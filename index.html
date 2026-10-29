@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bloch Pilot</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #061418; color: #e8f6f4;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
+  canvas { display: block; }
+  #overlay { position: absolute; left: 16px; bottom: 16px; max-width: 340px; background: rgba(6, 20, 24, 0.88);
+    padding: 10px 12px; border-radius: 10px; font-size: 13px; line-height: 1.4; border: 1px solid #1f6f6c; }
+  #overlay button { position: absolute; top: 6px; right: 8px; background: none; border: 0; color: #9fbfbb; font-size: 18px; cursor: pointer; }
+  #overlay h1 { font-size: 18px; margin: 0 0 6px; letter-spacing: 0.02em; }
+  #overlay p { margin: 0 0 6px; }
+  #overlay .small { opacity: 0.75; font-size: 12px; }
+  #overlay select { font-size: 16px; padding: 4px 8px; background: #0d2a2f; color: #e8f6f4; border: 1px solid #1f6f6c; border-radius: 6px; }
+  #log { position: absolute; inset: 0; overflow: auto; background: #061418; padding: 24px; display: none; }
+  #log table { border-collapse: collapse; font-size: 14px; }
+  #log th, #log td { border: 1px solid #1f6f6c; padding: 6px 10px; text-align: left; font-variant-numeric: tabular-nums; }
+  #log button { margin: 12px 8px 0 0; padding: 8px 14px; background: #1f6f6c; color: #fff; border: 0; border-radius: 6px; font-size: 14px; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "./three.module.min.js", "three/addons/webxr/VRButton.js": "./VRButton.js" } }
+</script>
+</head>
+<body>
+<div id="overlay">
+  <button type="button" aria-label="Close" onclick="this.parentElement.style.display='none'">×</button>
+  <h1>Bloch Pilot</h1>
+  <p><b>Quest 3:</b> press <b>Enter VR</b> at the bottom. Point at a button and pull the trigger (or pinch) to press it. Walk around the sphere to look at it from every side.</p>
+  <p><b>Laptop:</b> click the buttons. Drag to look around the sphere. Keys: 1–5 add gates, Backspace undo, Enter launch, R reset view.</p>
+  <p class="hs"><b>Headset number:</b> <select id="hsPick" aria-label="Headset number"><option value="">pick</option></select> <span class="small">(staff: set once per headset)</span></p>
+  <p class="small" id="meta"></p>
+</div>
+<div id="log"></div>
+<script type="module" src="./main.js"></script>
+</body>
+</html>
