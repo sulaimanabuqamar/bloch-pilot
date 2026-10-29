@@ -19,6 +19,10 @@ const storeSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* 
 if (params.get('hs')) storeSet(HS_KEY, params.get('hs').slice(0, 12));
 const HEADSET = (params.get('hs') || storeGet(HS_KEY) || '').slice(0, 12);
 const LOG_KEY = 'blochPilotResults';
+// View: 'pilot' (default) puts the player on the tip of the state vector, standing on a big
+// glass Bloch sphere that turns under them. 'outside' is the original view of the sphere
+// in front of the player. ?view=outside starts in the outside view; a button switches.
+let viewMode = params.get('view') === 'outside' ? 'outside' : 'pilot';
 
 document.getElementById('meta').textContent =
   `Run length: ${RUN_MINUTES} min. Pass fidelity: ${Math.round(PASS_FIDELITY * 100)}%.`;
@@ -63,18 +67,31 @@ document.body.appendChild(VRButton.createButton(renderer));
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(C.bg);
 
-const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 60);
+const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 120);
+// Laptop camera. Outside view: orbit around the sphere. Pilot view: look around from just
+// behind the pilot's head (VR uses the real head instead).
 const PIVOT = new THREE.Vector3(0, 1.25, -0.9);
-const view = { yaw: 0, pitch: 0.2, dist: 1.55 };
+const PILOT_EYE = new THREE.Vector3(0, 2.3, 1.5);
+const VIEW_DEFAULTS = { outside: { yaw: 0, pitch: 0.2, dist: 1.55 }, pilot: { yaw: 0, pitch: -0.9 } };
+const views = { outside: { ...VIEW_DEFAULTS.outside }, pilot: { ...VIEW_DEFAULTS.pilot } };
 function placeDesktopCamera() {
-  camera.position.set(
-    PIVOT.x + view.dist * Math.sin(view.yaw) * Math.cos(view.pitch),
-    PIVOT.y + view.dist * Math.sin(view.pitch),
-    PIVOT.z + view.dist * Math.cos(view.yaw) * Math.cos(view.pitch),
-  );
-  camera.lookAt(PIVOT);
+  const view = views[viewMode];
+  if (viewMode === 'pilot') {
+    camera.fov = 80;
+    camera.position.copy(PILOT_EYE);
+    camera.lookAt(PILOT_EYE.clone().add(new THREE.Vector3(
+      Math.sin(view.yaw) * Math.cos(view.pitch), Math.sin(view.pitch), -Math.cos(view.yaw) * Math.cos(view.pitch))));
+  } else {
+    camera.fov = 70;
+    camera.position.set(
+      PIVOT.x + view.dist * Math.sin(view.yaw) * Math.cos(view.pitch),
+      PIVOT.y + view.dist * Math.sin(view.pitch),
+      PIVOT.z + view.dist * Math.cos(view.yaw) * Math.cos(view.pitch),
+    );
+    camera.lookAt(PIVOT);
+  }
+  camera.updateProjectionMatrix();
 }
-placeDesktopCamera();
 
 scene.add(new THREE.HemisphereLight(0xdffaf5, 0x0b2226, 1.4));
 const sun = new THREE.DirectionalLight(0xffffff, 1.2);
@@ -83,6 +100,38 @@ scene.add(sun);
 
 const grid = new THREE.GridHelper(12, 24, 0x1f6f6c, 0x0d2a2d);
 scene.add(grid);
+
+// Pilot view surroundings. Stars and the deck under the player's feet never move, so the
+// eye always has a fixed reference while the sphere turns (this is what keeps it comfortable).
+const stars = (() => {
+  const n = 900;
+  const pos = new Float32Array(n * 3);
+  let seed = 7;
+  const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+  for (let i = 0; i < n; i++) {
+    const u = rnd() * 2 - 1, a = rnd() * Math.PI * 2, r = 45 + rnd() * 20;
+    const s = Math.sqrt(1 - u * u);
+    pos.set([r * s * Math.cos(a), r * u, r * s * Math.sin(a)], i * 3);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  return new THREE.Points(g, new THREE.PointsMaterial({ color: 0xcfeee9, size: 2, sizeAttenuation: false }));
+})();
+scene.add(stars);
+
+const deck = new THREE.Group();
+{
+  const disc = new THREE.Mesh(new THREE.CircleGeometry(0.42, 64),
+    new THREE.MeshBasicMaterial({ color: 0x2a8f88, transparent: true, opacity: 0.1, depthWrite: false, side: THREE.DoubleSide }));
+  disc.rotation.x = -Math.PI / 2;
+  const edgePts = [];
+  for (let i = 0; i <= 96; i++) { const a = (i / 96) * Math.PI * 2; edgePts.push(new THREE.Vector3(Math.cos(a) * 0.42, 0, Math.sin(a) * 0.42)); }
+  const edge = new THREE.Line(new THREE.BufferGeometry().setFromPoints(edgePts),
+    new THREE.LineBasicMaterial({ color: 0x9ff0dd, transparent: true, opacity: 0.7 }));
+  deck.add(disc, edge);
+  deck.position.y = 0.003;
+}
+scene.add(deck);
 
 window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
@@ -266,10 +315,12 @@ axisLine([1, 0, 0]); axisLine([0, 1, 0]); axisLine([0, 0, 1]);
 const axisLabels = [
   ['|0⟩', [0, 0, 1]], ['|1⟩', [0, 0, -1]], ['|+⟩', [1, 0, 0]], ['|−⟩', [-1, 0, 0]], ['|+i⟩', [0, 1, 0]], ['|−i⟩', [0, -1, 0]],
 ];
+const axisLabelSprites = [];
 for (const [t, v] of axisLabels) {
   const s = makeLabelSprite(t);
   s.position.copy(blochDir(v).multiplyScalar(R + 0.07));
   sphereGroup.add(s);
+  axisLabelSprites.push(s);
 }
 
 // State arrow
@@ -325,7 +376,8 @@ pathGeom.setAttribute('position', new THREE.BufferAttribute(pathPositions, 3));
 pathGeom.setDrawRange(0, 0);
 const pathLine = new THREE.Line(pathGeom, new THREE.LineBasicMaterial({ color: C.path }));
 // Lines are 1 pixel wide in WebXR, so the trail also gets world-sized dots to stay visible.
-pathLine.add(new THREE.Points(pathGeom, new THREE.PointsMaterial({ color: C.path, size: 0.012, sizeAttenuation: true })));
+const pathDots = new THREE.Points(pathGeom, new THREE.PointsMaterial({ color: C.path, size: 0.012, sizeAttenuation: true }));
+pathLine.add(pathDots);
 sphereGroup.add(pathLine);
 let pathCount = 0;
 function resetPath() { pathCount = 0; pathGeom.setDrawRange(0, 0); }
@@ -345,6 +397,36 @@ const fogMark = makeLabelSprite('?', '#ffffff', 0.18);
 fog.add(fogMark);
 fog.visible = false;
 sphereGroup.add(fog);
+
+// ---------------------------------------------------------------------------
+// Pilot view: the player rides the tip of the state vector.
+// The sphere is scaled up and sits under the player's feet. Instead of moving the player
+// (which makes people dizzy in VR), the sphere turns under them by the inverse of each gate's
+// rotation, so the tip of the arrow always stays exactly at the player's feet.
+// planetQ is that orientation: planetQ * (state direction) = straight up.
+// ---------------------------------------------------------------------------
+const PLANET_RADIUS = 1.1; // metres
+const PLANET_SCALE = PLANET_RADIUS / R;
+const planetQ = new THREE.Quaternion();
+const tmpQ = new THREE.Quaternion();
+
+function syncPlanet() {
+  if (viewMode === 'pilot') sphereGroup.quaternion.copy(planetQ);
+  else sphereGroup.quaternion.identity();
+}
+
+// Point the sphere so that the state vec is straight up (used when a circuit starts over).
+function resetPlanet(vec) {
+  planetQ.setFromUnitVectors(blochDir(vec).normalize(), UP);
+  syncPlanet();
+}
+
+// Orientation part-way through a gate: q0 times the inverse of the gate's rotation so far.
+function planetDuring(q0, gate, angle) {
+  tmpQ.setFromAxisAngle(blochDir(gate.axis).normalize(), -angle);
+  planetQ.copy(q0).multiply(tmpQ).normalize();
+  syncPlanet();
+}
 
 // ---------------------------------------------------------------------------
 // Panels
@@ -373,6 +455,52 @@ hintBtn.mesh.position.set(-0.17, 0, 0);
 const primaryBtn = makeButton({ w: 0.34, h: 0.1, label: 'START', kind: 'go', onClick: () => primaryAction() });
 primaryBtn.mesh.position.set(0.15, 0, 0);
 missionButtons.add(hintBtn.mesh, primaryBtn.mesh);
+
+// View switch, under the left panel
+let gameReady = false;
+const viewGroup = new THREE.Group();
+viewGroup.position.set(-0.95, 0.98, -0.95);
+faceEye(viewGroup);
+scene.add(viewGroup);
+const viewBtn = makeButton({ w: 0.4, h: 0.09, label: 'OUTSIDE VIEW', onClick: () => setView(viewMode === 'pilot' ? 'outside' : 'pilot') });
+viewGroup.add(viewBtn.mesh);
+
+function setView(mode) {
+  viewMode = mode;
+  const pilot = mode === 'pilot';
+  if (pilot) {
+    sphereGroup.position.set(0, -PLANET_RADIUS, 0);
+    sphereGroup.scale.setScalar(PLANET_SCALE);
+    banner.mesh.position.set(0, 1.64, -1.3);
+    scene.background.set('#02090b');
+  } else {
+    sphereGroup.position.copy(CENTER);
+    sphereGroup.scale.setScalar(1);
+    banner.mesh.position.set(0, 2.08, -1.25);
+    scene.background.set(C.bg);
+    for (const s of axisLabelSprites) s.material.opacity = 1;
+  }
+  faceEye(banner.mesh);
+  pathDots.material.size = 0.012 * (pilot ? PLANET_SCALE : 1);
+  grid.visible = !pilot;
+  stars.visible = pilot;
+  deck.visible = pilot;
+  syncPlanet();
+  placeDesktopCamera();
+  if (gameReady) refreshAll();
+}
+
+// In the pilot view, axis labels that come close to the player's feet fade out so they
+// never sit in the player's face.
+const tmpV = new THREE.Vector3();
+function fadeNearLabels() {
+  if (viewMode !== 'pilot') return;
+  for (const s of axisLabelSprites) {
+    s.getWorldPosition(tmpV);
+    const d = tmpV.length();
+    s.material.opacity = Math.max(0, Math.min(1, (d - 0.3) / 0.4));
+  }
+}
 
 // Circuit tray + actions
 const trayGroup = new THREE.Group();
@@ -482,6 +610,7 @@ const state = {
 };
 
 const level = () => LEVELS[state.levelIndex];
+const goalText = (L) => (viewMode === 'pilot' && L.pilotGoal) || L.goal;
 const now = () => performance.now() / 1000;
 const elapsed = () => (state.runStart ? (state.runEnd || now()) - state.runStart : 0);
 
@@ -526,12 +655,13 @@ function loadLevel(i) {
   state.psi = KET[L.start];
   state.vec = bloch(state.psi);
   setArrow(state.vec);
+  resetPlanet(state.vec);
   setBeacon(bloch(L.target));
   resetPath();
   ghost.visible = false;
   applyFog(L.fog);
   buildTraySlots(L.budget);
-  setMessage(L.goal, 'info');
+  setMessage(goalText(L), 'info');
   refreshAll();
 }
 
@@ -574,14 +704,16 @@ function launch() {
   state.psi = KET[L.start];
   state.vec = bloch(state.psi);
   setArrow(state.vec);
+  resetPlanet(state.vec);
   resetPath();
   pushPath(state.vec);
-  state.anim = { index: 0, t: 0, from: state.vec.slice() };
+  state.anim = { index: 0, t: 0, from: state.vec.slice(), q0: planetQ.clone() };
   setMessage('Launching…', 'info');
   refreshAll();
 }
 
-const STEP_SECONDS = 0.8;
+// Seconds per gate. Slower in the pilot view: the ground turning under you should feel calm.
+const stepSeconds = () => (viewMode === 'pilot' ? 2.2 : 0.8);
 const ease = (t) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
 
 function stepAnimation(dt) {
@@ -589,18 +721,21 @@ function stepAnimation(dt) {
   if (!a) return;
   const g = GATES[state.tray[a.index]];
   a.t += dt;
-  const p = Math.min(1, a.t / STEP_SECONDS);
+  const p = Math.min(1, a.t / stepSeconds());
   const v = rotate(a.from, g.axis, g.angle * ease(p));
   state.vec = v;
   setArrow(v);
+  planetDuring(a.q0, g, g.angle * ease(p));
   pushPath(v);
   if (p >= 1) {
     state.psi = applyGate(g, state.psi);
     state.vec = bloch(state.psi);
     setArrow(state.vec);
+    planetDuring(a.q0, g, g.angle);
     a.index++;
     a.t = 0;
     a.from = state.vec.slice();
+    a.q0 = planetQ.clone();
     drawTray();
     if (a.index >= state.tray.length) {
       state.anim = null;
@@ -676,6 +811,7 @@ function resetForNextPlayer() {
   state.psi = KET['0'];
   state.vec = [0, 0, 1];
   setArrow(state.vec);
+  resetPlanet(state.vec);
   resetPath();
   ghost.visible = false;
   applyFog(false);
@@ -843,9 +979,15 @@ function drawMission() {
     y += 70;
     ctx.fillStyle = C.text;
     ctx.font = `500 42px ${FONT}`;
-    y = wrap(ctx, 'Steer the orange arrow (your qubit) to the glowing beacon.', x, y, maxW, 54);
-    y += 14;
-    y = wrap(ctx, '1. Press gate blocks to build your circuit.\n2. Press LAUNCH and watch the arrow move.\n3. Reach the beacon to pass the checkpoint.', x, y, maxW, 54);
+    if (viewMode === 'pilot') {
+      y = wrap(ctx, 'You are the qubit. You stand on the tip of its arrow. Look down: the sphere is under your feet.', x, y, maxW, 54);
+      y += 14;
+      y = wrap(ctx, '1. Press gate blocks to build your circuit.\n2. Press LAUNCH. The sphere turns under you.\n3. Bring the glowing beacon to your feet.', x, y, maxW, 54);
+    } else {
+      y = wrap(ctx, 'Steer the orange arrow (your qubit) to the glowing beacon.', x, y, maxW, 54);
+      y += 14;
+      y = wrap(ctx, '1. Press gate blocks to build your circuit.\n2. Press LAUNCH and watch the arrow move.\n3. Reach the beacon to pass the checkpoint.', x, y, maxW, 54);
+    }
     y += 14;
     ctx.fillStyle = C.dim;
     ctx.font = `500 38px ${FONT}`;
@@ -908,7 +1050,7 @@ function drawMission() {
       ctx.font = `600 40px ${FONT}`;
       ctx.fillText(state.levelIndex < LEVELS.length - 1 ? 'Press NEXT for the next level.' : 'Press FINISH to see your results.', x, y);
     } else {
-      y = wrap(ctx, L.goal, x, y, maxW, 52);
+      y = wrap(ctx, goalText(L), x, y, maxW, 52);
       y += 10;
       ctx.fillStyle = C.dim;
       y = wrap(ctx, `Target: ${L.targetName}. Gate budget: ${L.budget}.`, x, y, maxW, 52);
@@ -936,6 +1078,8 @@ function refreshButtons() {
   else if (state.phase === 'finished') primaryBtn.setLabel('NEW PLAYER', 'neutral');
   else primaryBtn.setLabel('NEXT', 'go');
   primaryBtn.setEnabled(state.phase !== 'playing' && !state.anim);
+  viewBtn.setLabel(viewMode === 'pilot' ? 'OUTSIDE VIEW' : 'PILOT VIEW');
+  viewBtn.setEnabled(!state.anim);
 }
 
 function refreshAll() {
@@ -1020,6 +1164,7 @@ const mouse = new THREE.Vector2();
 let mouseHover = null;
 let drag = null;
 renderer.domElement.addEventListener('pointerdown', (e) => {
+  const view = views[viewMode];
   drag = { x: e.clientX, y: e.clientY, moved: false, yaw: view.yaw, pitch: view.pitch };
 });
 renderer.domElement.addEventListener('pointermove', (e) => {
@@ -1029,8 +1174,14 @@ renderer.domElement.addEventListener('pointermove', (e) => {
     const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
     if (Math.abs(dx) + Math.abs(dy) > 6) drag.moved = true;
     if (drag.moved) {
-      view.yaw = drag.yaw - dx * 0.006;
-      view.pitch = Math.max(-0.6, Math.min(1.1, drag.pitch + dy * 0.004));
+      const view = views[viewMode];
+      if (viewMode === 'pilot') {
+        view.yaw = drag.yaw - dx * 0.004;
+        view.pitch = Math.max(-1.5, Math.min(0.7, drag.pitch + dy * 0.004));
+      } else {
+        view.yaw = drag.yaw - dx * 0.006;
+        view.pitch = Math.max(-0.6, Math.min(1.1, drag.pitch + dy * 0.004));
+      }
       placeDesktopCamera();
     }
   }
@@ -1050,7 +1201,8 @@ window.addEventListener('keydown', (e) => {
   if (e.key >= '1' && e.key <= '5') addGate(GATE_ORDER[Number(e.key) - 1]);
   else if (e.key === 'Backspace') undo();
   else if (e.key === 'Enter') { if (state.phase === 'playing') launch(); else primaryAction(); }
-  else if (e.key === 'r' || e.key === 'R') { view.yaw = 0; view.pitch = 0.2; placeDesktopCamera(); }
+  else if (e.key === 'r' || e.key === 'R') { Object.assign(views[viewMode], VIEW_DEFAULTS[viewMode]); placeDesktopCamera(); }
+  else if (e.key === 'v' || e.key === 'V') { if (!state.anim) setView(viewMode === 'pilot' ? 'outside' : 'pilot'); }
   else if (e.key === 'h' || e.key === 'H') toggleHint();
 });
 
@@ -1089,6 +1241,7 @@ renderer.setAnimationLoop(() => {
   const s = 1 + 0.25 * Math.sin(t * 4);
   beaconHalo.scale.setScalar(s);
   fogMark.material.opacity = 0.6 + 0.4 * Math.sin(t * 2);
+  fadeNearLabels();
 
   // Clock
   if (state.runStart && (state.phase === 'playing' || state.phase === 'solved')) {
@@ -1123,6 +1276,19 @@ function showLog() {
 }
 
 // Test hook for automated checks.
-window.__bloch = { state, addGate, launch, undo, clearTray, primaryAction, totalScore, LEVELS, finishRun };
+window.__bloch = {
+  state, addGate, launch, undo, clearTray, primaryAction, totalScore, LEVELS, finishRun, setView,
+  view: () => viewMode,
+  tipWorld: () => tipDot.getWorldPosition(new THREE.Vector3()).toArray(),
+  beaconWorld: () => beacon.getWorldPosition(new THREE.Vector3()).toArray(),
+  setLook: (yaw, pitch) => { Object.assign(views[viewMode], { yaw, pitch }); placeDesktopCamera(); },
+  debugCam: (pos, yaw, pitch, fov) => {
+    camera.fov = fov; camera.position.set(...pos);
+    camera.lookAt(camera.position.clone().add(new THREE.Vector3(Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch))));
+    camera.updateProjectionMatrix();
+  },
+};
 
+setView(viewMode);
+gameReady = true;
 resetForNextPlayer();

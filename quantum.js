@@ -119,6 +119,7 @@ export const LEVELS = [
     solution: ['X'],
     fog: false,
     goal: 'Move the arrow from |0⟩ at the top to the beacon at the bottom.',
+    pilotGoal: 'You start on |0⟩, the top of the sphere. The beacon is straight below you at |1⟩. Get there.',
     hint: 'X is a half-turn around the X axis. It takes the top of the sphere to the bottom.',
   },
   {
