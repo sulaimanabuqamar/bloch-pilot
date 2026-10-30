@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
 import {
-  GATES, GATE_ORDER, KET, LEVELS, applyGate, bloch, fidelity, probabilities, rotate,
+  GATES, GATE_ORDER, KET, LEVELS as TUTORIAL_LEVELS, CHALLENGE_LEVELS, applyGate, bloch, fidelity, probabilities, rotate,
   PASS_FIDELITY, POINTS_PER_FIDELITY, POINTS_PER_SPARE_GATE,
 } from './quantum.js';
 
@@ -19,10 +19,35 @@ const storeSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* 
 if (params.get('hs')) storeSet(HS_KEY, params.get('hs').slice(0, 12));
 const HEADSET = (params.get('hs') || storeGet(HS_KEY) || '').slice(0, 12);
 const LOG_KEY = 'blochPilotResults';
-// View: 'pilot' (default) puts the player on the tip of the state vector, standing on a big
-// glass Bloch sphere that turns under them. 'outside' is the original view of the sphere
-// in front of the player. ?view=outside starts in the outside view; a button switches.
-let viewMode = params.get('view') === 'outside' ? 'outside' : 'pilot';
+// Views:
+//   'inside'  (default) the player stands in the middle of a big Bloch sphere; the state
+//             arrow comes out of their chest and swings around them.
+//   'outside' the original view: a small sphere in front of the player.
+//   'tip'     the player rides the tip of the arrow, on a sphere that turns under their feet
+//             (only through ?view=tip).
+// A button switches between inside and outside.
+const VIEW_PARAM = params.get('view');
+let viewMode = VIEW_PARAM === 'outside' ? 'outside' : VIEW_PARAM === 'tip' ? 'tip' : 'inside';
+
+// Round: 'tutorial' (the first game: a warm-up and 3 levels) or 'challenge' (5 harder levels).
+// Staff pick it once per headset on the start page; it is remembered on the device.
+const ROUND_KEY = 'blochPilotRound';
+if (params.get('round')) storeSet(ROUND_KEY, params.get('round') === 'challenge' ? 'challenge' : 'tutorial');
+const ROUND = storeGet(ROUND_KEY) === 'challenge' ? 'challenge' : 'tutorial';
+const LEVELS = ROUND === 'challenge' ? CHALLENGE_LEVELS : TUTORIAL_LEVELS;
+const ROUND_NAME = ROUND === 'challenge' ? 'Challenge round' : 'Tutorial round';
+{
+  const pick = document.getElementById('roundPick');
+  if (pick) {
+    pick.value = ROUND;
+    pick.addEventListener('change', () => {
+      storeSet(ROUND_KEY, pick.value);
+      const url = new URL(location.href);
+      url.searchParams.delete('round');
+      location.replace(url.toString());
+    });
+  }
+}
 
 document.getElementById('meta').textContent =
   `Run length: ${RUN_MINUTES} min. Pass fidelity: ${Math.round(PASS_FIDELITY * 100)}%.`;
@@ -72,14 +97,16 @@ const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerH
 // behind the pilot's head (VR uses the real head instead).
 const PIVOT = new THREE.Vector3(0, 1.25, -0.9);
 const PILOT_EYE = new THREE.Vector3(0, 2.3, 1.5);
-const VIEW_DEFAULTS = { outside: { yaw: 0, pitch: 0.2, dist: 1.55 }, pilot: { yaw: 0, pitch: -0.9 } };
-const views = { outside: { ...VIEW_DEFAULTS.outside }, pilot: { ...VIEW_DEFAULTS.pilot } };
+const INSIDE_EYE = new THREE.Vector3(0, 1.6, 0.05);
+const VIEW_DEFAULTS = { outside: { yaw: 0, pitch: 0.2, dist: 1.55 }, tip: { yaw: 0, pitch: -0.9 }, inside: { yaw: 0, pitch: -0.12 } };
+const views = { outside: { ...VIEW_DEFAULTS.outside }, tip: { ...VIEW_DEFAULTS.tip }, inside: { ...VIEW_DEFAULTS.inside } };
 function placeDesktopCamera() {
   const view = views[viewMode];
-  if (viewMode === 'pilot') {
-    camera.fov = 80;
-    camera.position.copy(PILOT_EYE);
-    camera.lookAt(PILOT_EYE.clone().add(new THREE.Vector3(
+  if (viewMode === 'tip' || viewMode === 'inside') {
+    const eye = viewMode === 'tip' ? PILOT_EYE : INSIDE_EYE;
+    camera.fov = viewMode === 'tip' ? 80 : 85;
+    camera.position.copy(eye);
+    camera.lookAt(eye.clone().add(new THREE.Vector3(
       Math.sin(view.yaw) * Math.cos(view.pitch), Math.sin(view.pitch), -Math.cos(view.yaw) * Math.cos(view.pitch))));
   } else {
     camera.fov = 70;
@@ -152,6 +179,10 @@ function makeCanvasPlane(wM, hM, pxW = 1024) {
   tex.anisotropy = 4;
   const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false });
   const mesh = new THREE.Mesh(new THREE.PlaneGeometry(wM, hM), mat);
+  // Panels and buttons are UI: they draw after the sphere and on top of it, so the arrow or the
+  // fog never covers a button the player needs.
+  mesh.renderOrder = 10;
+  mat.depthTest = false;
   return { mesh, canvas, ctx, tex, W: canvas.width, H: canvas.height };
 }
 
@@ -411,7 +442,7 @@ const planetQ = new THREE.Quaternion();
 const tmpQ = new THREE.Quaternion();
 
 function syncPlanet() {
-  if (viewMode === 'pilot') sphereGroup.quaternion.copy(planetQ);
+  if (viewMode === 'tip') sphereGroup.quaternion.copy(planetQ);
   else sphereGroup.quaternion.identity();
 }
 
@@ -462,29 +493,57 @@ const viewGroup = new THREE.Group();
 viewGroup.position.set(-0.95, 0.98, -0.95);
 faceEye(viewGroup);
 scene.add(viewGroup);
-const viewBtn = makeButton({ w: 0.4, h: 0.09, label: 'OUTSIDE VIEW', onClick: () => setView(viewMode === 'pilot' ? 'outside' : 'pilot') });
+const otherView = () => (viewMode === 'outside' ? 'inside' : 'outside');
+const viewBtn = makeButton({ w: 0.4, h: 0.09, label: 'OUTSIDE VIEW', onClick: () => setView(otherView()) });
 viewGroup.add(viewBtn.mesh);
+
+// Inside view: sphere centred on the player's chest, big enough that every panel sits inside it.
+const INSIDE_CENTER = new THREE.Vector3(0, 1.25, 0);
+const INSIDE_RADIUS = 2.4; // metres
+const INSIDE_SCALE = INSIDE_RADIUS / R;
 
 function setView(mode) {
   viewMode = mode;
-  const pilot = mode === 'pilot';
-  if (pilot) {
+  const space = mode !== 'outside';
+  for (const s of axisLabelSprites) s.material.opacity = 1;
+  arrow.scale.set(1, 1, 1);
+  tipDot.scale.set(1, 1, 1);
+  shaft.scale.y = 1;
+  shaft.position.y = (R * 0.86) / 2;
+  fogMark.visible = true;
+  beacon.scale.setScalar(1);
+  fog.material.side = THREE.FrontSide;
+  if (mode === 'tip') {
     sphereGroup.position.set(0, -PLANET_RADIUS, 0);
     sphereGroup.scale.setScalar(PLANET_SCALE);
     banner.mesh.position.set(0, 1.64, -1.3);
-    scene.background.set('#02090b');
+    pathDots.material.size = 0.012 * PLANET_SCALE;
+  } else if (mode === 'inside') {
+    sphereGroup.position.copy(INSIDE_CENTER);
+    sphereGroup.scale.setScalar(INSIDE_SCALE);
+    banner.mesh.position.set(0, 2.08, -1.25);
+    pathDots.material.size = 0.03;
+    // A thinner arrow: at this size the normal one would be a 10 cm pole in the player's face.
+    arrow.scale.set(0.3, 1, 0.3);
+    tipDot.scale.set(1, 0.3, 1);
+    // The shaft starts 0.8 m out from the chest, so it never passes through the player's head
+    // or fills their view; the dashed beacon line still shows where it comes from.
+    shaft.scale.y = (0.86 - 0.35) / 0.86;
+    shaft.position.y = (R * (0.35 + 0.86)) / 2;
+    fogMark.visible = false; // its centre would be the player's chest
+    beacon.scale.setScalar(0.7);
+    fog.material.side = THREE.DoubleSide; // the player is inside the fog, so draw its inner face
   } else {
     sphereGroup.position.copy(CENTER);
     sphereGroup.scale.setScalar(1);
     banner.mesh.position.set(0, 2.08, -1.25);
-    scene.background.set(C.bg);
-    for (const s of axisLabelSprites) s.material.opacity = 1;
+    pathDots.material.size = 0.012;
   }
+  scene.background.set(space ? '#02090b' : C.bg);
   faceEye(banner.mesh);
-  pathDots.material.size = 0.012 * (pilot ? PLANET_SCALE : 1);
-  grid.visible = !pilot;
-  stars.visible = pilot;
-  deck.visible = pilot;
+  grid.visible = !space;
+  stars.visible = space;
+  deck.visible = space;
   syncPlanet();
   placeDesktopCamera();
   if (gameReady) refreshAll();
@@ -494,7 +553,7 @@ function setView(mode) {
 // never sit in the player's face.
 const tmpV = new THREE.Vector3();
 function fadeNearLabels() {
-  if (viewMode !== 'pilot') return;
+  if (viewMode !== 'tip') return;
   for (const s of axisLabelSprites) {
     s.getWorldPosition(tmpV);
     const d = tmpV.length();
@@ -509,6 +568,7 @@ faceEye(trayGroup);
 scene.add(trayGroup);
 const trayTitle = makeLabelSprite('CIRCUIT', C.dim, 0.05);
 trayTitle.position.set(-0.47, 0, 0.001);
+trayTitle.renderOrder = 10; trayTitle.material.depthTest = false;
 trayGroup.add(trayTitle);
 let traySlots = [];
 
@@ -537,6 +597,7 @@ GATE_ORDER.forEach((k, i) => {
 });
 const paletteTitle = makeLabelSprite('GATES', C.dim, 0.05);
 paletteTitle.position.set(-0.5, 0, 0.001);
+paletteTitle.renderOrder = 10; paletteTitle.material.depthTest = false;
 paletteGroup.add(paletteTitle);
 
 function buildTraySlots(budget) {
@@ -610,7 +671,7 @@ const state = {
 };
 
 const level = () => LEVELS[state.levelIndex];
-const goalText = (L) => (viewMode === 'pilot' && L.pilotGoal) || L.goal;
+const goalText = (L) => (viewMode === 'tip' && L.pilotGoal) || (viewMode === 'inside' && L.insideGoal) || L.goal;
 const now = () => performance.now() / 1000;
 const elapsed = () => (state.runStart ? (state.runEnd || now()) - state.runStart : 0);
 
@@ -713,7 +774,7 @@ function launch() {
 }
 
 // Seconds per gate. Slower in the pilot view: the ground turning under you should feel calm.
-const stepSeconds = () => (viewMode === 'pilot' ? 2.2 : 0.8);
+const stepSeconds = () => (viewMode === 'tip' ? 2.2 : viewMode === 'inside' ? 1.4 : 0.8);
 const ease = (t) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
 
 function stepAnimation(dt) {
@@ -771,7 +832,7 @@ function finishLaunch() {
 function revealPhase() {
   state.revealed = true;
   applyFog(false);
-  ghost.position.copy(blochLocal(bloch(KET['+'])));
+  ghost.position.copy(blochLocal(bloch(KET[level().ghost || '+'])));
   ghost.visible = true;
 }
 
@@ -827,6 +888,7 @@ function saveResult() {
     list.push({
       at: new Date().toISOString(),
       headset: HEADSET,
+      round: ROUND,
       score: totalScore(),
       time: Math.round(elapsed()),
       reason: state.finishReason,
@@ -905,7 +967,7 @@ function drawHUD() {
   y += 76;
   ctx.fillStyle = C.text;
   ctx.font = `700 48px ${FONT}`;
-  const title = state.phase === 'intro' ? 'Ready to fly' : state.phase === 'finished' ? 'Run complete' : level().title;
+  const title = state.phase === 'intro' ? `Ready · ${ROUND_NAME}` : state.phase === 'finished' ? 'Run complete' : level().title;
   y = wrap(ctx, title, x, y, right - x, 58);
 
   const remaining = RUN_MINUTES * 60 - elapsed();
@@ -979,7 +1041,11 @@ function drawMission() {
     y += 70;
     ctx.fillStyle = C.text;
     ctx.font = `500 42px ${FONT}`;
-    if (viewMode === 'pilot') {
+    if (viewMode === 'inside') {
+      y = wrap(ctx, 'You are inside the Bloch sphere. The orange arrow coming out of your chest is your qubit.', x, y, maxW, 54);
+      y += 14;
+      y = wrap(ctx, '1. Press gate blocks to build your circuit.\n2. Press LAUNCH and the arrow swings around you.\n3. Point the arrow at the glowing beacon.', x, y, maxW, 54);
+    } else if (viewMode === 'tip') {
       y = wrap(ctx, 'You are the qubit. You stand on the tip of its arrow. Look down: the sphere is under your feet.', x, y, maxW, 54);
       y += 14;
       y = wrap(ctx, '1. Press gate blocks to build your circuit.\n2. Press LAUNCH. The sphere turns under you.\n3. Bring the glowing beacon to your feet.', x, y, maxW, 54);
@@ -991,7 +1057,9 @@ function drawMission() {
     y += 14;
     ctx.fillStyle = C.dim;
     ctx.font = `500 38px ${FONT}`;
-    wrap(ctx, `${RUN_MINUTES} minutes for a tutorial and 3 scored levels. Score: fidelity first, then spare gates, then time.`, x, y, maxW, 50);
+    const nScored = LEVELS.filter((L) => L.scored).length;
+    const warm = LEVELS.some((L) => !L.scored) ? 'a warm-up and ' : '';
+    wrap(ctx, `${ROUND_NAME}: ${RUN_MINUTES} minutes for ${warm}${nScored} scored levels. Score: fidelity first, then spare gates, then time.`, x, y, maxW, 50);
   } else if (state.phase === 'finished') {
     ctx.fillText('RESULTS', x, y);
     if (HEADSET) {
@@ -1034,7 +1102,7 @@ function drawMission() {
     ctx.font = `500 40px ${FONT}`;
     if (state.phase === 'solved') {
       if (L.fog) {
-        y = wrap(ctx, 'The fog is gone. |+⟩ and |−⟩ both measure 50/50, but they sit on opposite sides of the sphere. That difference is the phase.', x, y, maxW, 52);
+        y = wrap(ctx, L.revealText || 'The fog is gone.', x, y, maxW, 52);
         y += 12;
       }
       ctx.fillStyle = C.dim;
@@ -1078,7 +1146,7 @@ function refreshButtons() {
   else if (state.phase === 'finished') primaryBtn.setLabel('NEW PLAYER', 'neutral');
   else primaryBtn.setLabel('NEXT', 'go');
   primaryBtn.setEnabled(state.phase !== 'playing' && !state.anim);
-  viewBtn.setLabel(viewMode === 'pilot' ? 'OUTSIDE VIEW' : 'PILOT VIEW');
+  viewBtn.setLabel(viewMode === 'outside' ? 'INSIDE VIEW' : 'OUTSIDE VIEW');
   viewBtn.setEnabled(!state.anim);
 }
 
@@ -1117,8 +1185,11 @@ const controllers = [0, 1].map((i) => {
   const rayGeom = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -1)]);
   const ray = new THREE.Line(rayGeom, new THREE.LineBasicMaterial({ color: 0x9ff0dd, transparent: true, opacity: 0.8 }));
   ray.scale.z = 2.5;
+  ray.renderOrder = 20;
+  ray.material.depthTest = false;
   ctrl.add(ray);
-  const dot = new THREE.Mesh(new THREE.SphereGeometry(0.008, 12, 8), new THREE.MeshBasicMaterial({ color: 0x9ff0dd }));
+  const dot = new THREE.Mesh(new THREE.SphereGeometry(0.008, 12, 8), new THREE.MeshBasicMaterial({ color: 0x9ff0dd, depthTest: false }));
+  dot.renderOrder = 20;
   dot.visible = false;
   scene.add(dot);
   const entry = { ctrl, ray, dot, source: null, hovered: null };
@@ -1175,7 +1246,7 @@ renderer.domElement.addEventListener('pointermove', (e) => {
     if (Math.abs(dx) + Math.abs(dy) > 6) drag.moved = true;
     if (drag.moved) {
       const view = views[viewMode];
-      if (viewMode === 'pilot') {
+      if (viewMode !== 'outside') {
         view.yaw = drag.yaw - dx * 0.004;
         view.pitch = Math.max(-1.5, Math.min(0.7, drag.pitch + dy * 0.004));
       } else {
@@ -1202,7 +1273,7 @@ window.addEventListener('keydown', (e) => {
   else if (e.key === 'Backspace') undo();
   else if (e.key === 'Enter') { if (state.phase === 'playing') launch(); else primaryAction(); }
   else if (e.key === 'r' || e.key === 'R') { Object.assign(views[viewMode], VIEW_DEFAULTS[viewMode]); placeDesktopCamera(); }
-  else if (e.key === 'v' || e.key === 'V') { if (!state.anim) setView(viewMode === 'pilot' ? 'outside' : 'pilot'); }
+  else if (e.key === 'v' || e.key === 'V') { if (!state.anim) setView(otherView()); }
   else if (e.key === 'h' || e.key === 'H') toggleHint();
 });
 
@@ -1264,9 +1335,9 @@ function showLog() {
   el.style.display = 'block';
   let list = [];
   try { list = JSON.parse(localStorage.getItem(LOG_KEY) || '[]'); } catch (e) { list = []; }
-  const rows = list.slice().reverse().map((r) => `<tr><td>${new Date(r.at).toLocaleTimeString()}</td><td>${r.headset || ''}</td><td>${r.score}</td><td>${fmtTime(r.time)}</td><td>${r.levels.filter((l) => l.solved && l.id !== 'tutorial').length}/3</td><td>${r.reason}</td></tr>`).join('');
+  const rows = list.slice().reverse().map((r) => `<tr><td>${new Date(r.at).toLocaleTimeString()}</td><td>${r.headset || ''}</td><td>${r.score}</td><td>${fmtTime(r.time)}</td><td>${r.round || ''}</td><td>${r.levels.filter((l) => l.solved && l.id !== 'tutorial').length}/${r.levels.filter((l) => l.id !== 'tutorial').length}</td><td>${r.reason}</td></tr>`).join('');
   el.innerHTML = `<h2>Results saved on this device</h2>
-    <table><tr><th>Finished</th><th>Headset</th><th>Score</th><th>Time</th><th>Levels solved</th><th>Ended by</th></tr>${rows || '<tr><td colspan="6">No runs yet.</td></tr>'}</table>
+    <table><tr><th>Finished</th><th>Headset</th><th>Score</th><th>Time</th><th>Round</th><th>Levels solved</th><th>Ended by</th></tr>${rows || '<tr><td colspan="7">No runs yet.</td></tr>'}</table>
     <button id="close-log">Back to the game</button><button id="clear-log">Delete all results on this device</button>`;
   el.querySelector('#close-log').onclick = () => { el.style.display = 'none'; };
   el.querySelector('#clear-log').onclick = () => {
@@ -1279,6 +1350,7 @@ function showLog() {
 window.__bloch = {
   state, addGate, launch, undo, clearTray, primaryAction, totalScore, LEVELS, finishRun, setView,
   view: () => viewMode,
+  round: ROUND,
   tipWorld: () => tipDot.getWorldPosition(new THREE.Vector3()).toArray(),
   beaconWorld: () => beacon.getWorldPosition(new THREE.Vector3()).toArray(),
   setLook: (yaw, pitch) => { Object.assign(views[viewMode], { yaw, pitch }); placeDesktopCamera(); },
