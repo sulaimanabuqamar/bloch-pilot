@@ -245,3 +245,33 @@ export const CHALLENGE_LEVELS = [
     hint: 'S and Z only turn in 90° steps, so you cannot turn 45° on the equator. Get 45° off the top on the |+i⟩ side first, then use H.',
   },
 ];
+
+// Marathon round: 20 more levels for players who finish the challenge fast. Each target is
+// the end of a different shortest route (2 to 6 gates, found by exhaustive search over all
+// circuits up to 6 gates); the budget is that length + 1, so the shortest route earns +100.
+// Every 5th level is fogged.
+const MARATHON_ROUTES = [
+  ['X','RY'],['RY','S'],['RY','S','RY'],['RY','Z','S'],['H','RY','S','RY'],
+  ['X','RY','S','RY'],['RY','S','RY','S'],['RY','Z','S','RY'],['RY','Z','S','H'],['H','RY','S','H'],
+  ['X','RY','S','H'],['RY','S','RY','S','H'],['RY','S','RY','S','RY'],['H','RY','S','RY','S'],['X','RY','S','RY','Z'],
+  ['X','RY','S','RY','S'],['X','RY','S','RY','S','RY'],['H','RY','S','RY','S','RY'],['X','RY','S','RY','Z','S'],['RY','S','RY','S','H','RY'],
+];
+export const MARATHON_LEVELS = MARATHON_ROUTES.map((route, i) => {
+  const fog = (i + 1) % 5 === 0;
+  return {
+    id: `m${i + 1}`,
+    title: `Marathon ${i + 1} of ${MARATHON_ROUTES.length}`,
+    scored: true,
+    start: '0',
+    target: runCircuit('0', route),
+    targetName: `the beacon (shortest route: ${route.length} gates)`,
+    budget: route.length + 1,
+    allowed: GATE_ORDER,
+    solution: route,
+    fog,
+    ghost: '+',
+    revealText: 'The fog is gone. The odds only told you how high or low you were; the phase was hidden.',
+    goal: fog ? 'Fogged: you only see the measurement odds. Reach the beacon.' : 'Reach the beacon.',
+    hint: `The shortest route has ${route.length} gates and starts with ${GATES[route[0]].name}.`,
+  };
+});

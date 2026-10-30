@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
 import {
-  GATES, GATE_ORDER, KET, LEVELS as TUTORIAL_LEVELS, CHALLENGE_LEVELS, applyGate, bloch, fidelity, probabilities, rotate,
+  GATES, GATE_ORDER, KET, LEVELS as TUTORIAL_LEVELS, CHALLENGE_LEVELS, MARATHON_LEVELS, applyGate, bloch, fidelity, probabilities, rotate,
   PASS_FIDELITY, POINTS_PER_FIDELITY, POINTS_PER_SPARE_GATE,
 } from './quantum.js';
 
@@ -39,10 +39,11 @@ let viewMode = VIEW_PARAM === 'outside' ? 'outside' : VIEW_PARAM === 'tip' ? 'ti
 // Round: 'tutorial' (the first game: a warm-up and 3 levels) or 'challenge' (5 harder levels).
 // Staff pick it once per headset on the start page; it is remembered on the device.
 const ROUND_KEY = 'blochPilotRound';
-if (params.get('round')) storeSet(ROUND_KEY, params.get('round') === 'challenge' ? 'challenge' : 'tutorial');
-const ROUND = storeGet(ROUND_KEY) === 'challenge' ? 'challenge' : 'tutorial';
-const LEVELS = ROUND === 'challenge' ? CHALLENGE_LEVELS : TUTORIAL_LEVELS;
-const ROUND_NAME = ROUND === 'challenge' ? 'Challenge round' : 'Tutorial round';
+const ROUNDS = { tutorial: [TUTORIAL_LEVELS, 'Tutorial round'], challenge: [CHALLENGE_LEVELS, 'Challenge round'], marathon: [MARATHON_LEVELS, 'Marathon round'] };
+if (params.get('round')) storeSet(ROUND_KEY, ROUNDS[params.get('round')] ? params.get('round') : 'tutorial');
+const ROUND = ROUNDS[storeGet(ROUND_KEY)] ? storeGet(ROUND_KEY) : 'tutorial';
+const LEVELS = ROUNDS[ROUND][0];
+const ROUND_NAME = ROUNDS[ROUND][1];
 {
   const pick = document.getElementById('roundPick');
   if (pick) {
@@ -1173,8 +1174,16 @@ function drawMission() {
       ctx.textAlign = 'left';
     }
     y += 72;
+    const scoredCount = LEVELS.filter((L) => L.scored).length;
+    if (scoredCount > 6) {
+      const passed = LEVELS.filter((L, i) => L.scored && state.results[i].solved).length;
+      ctx.font = `600 44px ${FONT}`;
+      ctx.fillStyle = C.text;
+      ctx.fillText(`Levels passed: ${passed} of ${scoredCount}`, x, y);
+      y += 64;
+    }
     LEVELS.forEach((L, i) => {
-      if (!L.scored) return;
+      if (!L.scored || scoredCount > 6) return;
       const r = state.results[i];
       ctx.font = `600 40px ${FONT}`;
       ctx.fillStyle = C.text;
