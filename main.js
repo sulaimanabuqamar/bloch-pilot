@@ -19,6 +19,13 @@ const storeSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* 
 if (params.get('hs')) storeSet(HS_KEY, params.get('hs').slice(0, 12));
 const HEADSET = (params.get('hs') || storeGet(HS_KEY) || '').slice(0, 12);
 const LOG_KEY = 'blochPilotResults';
+// Live leaderboard (Vercel). Each finished run is sent here; unsent runs wait in an outbox
+// on the headset and are retried every 10 s, so a Wi-Fi drop never loses a score.
+const BOARD_API = 'https://bloch-pilot-board.vercel.app/api/board';
+const OUTBOX_KEY = 'blochPilotOutbox';
+const PLAYER_KEY = 'blochPilotPlayer';
+let roster = [];                                   // player names saved by staff on the leaderboard
+let playerName = (storeGet(PLAYER_KEY) || '').slice(0, 60);
 // Views:
 //   'inside'  (default) the player stands in the middle of a big Bloch sphere; the state
 //             arrow comes out of their chest and swings around them.
@@ -487,6 +494,54 @@ const primaryBtn = makeButton({ w: 0.34, h: 0.1, label: 'START', kind: 'go', onC
 primaryBtn.mesh.position.set(0.15, 0, 0);
 missionButtons.add(hintBtn.mesh, primaryBtn.mesh);
 
+// Player picker (staff use it on the start screen): < name >
+const playerGroup = new THREE.Group();
+playerGroup.position.set(0.97, 0.97, -0.95);
+faceEye(playerGroup);
+scene.add(playerGroup);
+const prevPlayerBtn = makeButton({ w: 0.09, h: 0.09, label: '<', onClick: () => stepPlayer(-1) });
+const playerBtn = makeButton({ w: 0.42, h: 0.09, label: 'PICK PLAYER', onClick: () => stepPlayer(1), fontPx: 30 });
+const nextPlayerBtn = makeButton({ w: 0.09, h: 0.09, label: '>', onClick: () => stepPlayer(1) });
+prevPlayerBtn.mesh.position.set(-0.27, 0, 0);
+nextPlayerBtn.mesh.position.set(0.27, 0, 0);
+playerGroup.add(prevPlayerBtn.mesh, playerBtn.mesh, nextPlayerBtn.mesh);
+
+function setPlayer(name) {
+  playerName = (name || '').slice(0, 60);
+  storeSet(PLAYER_KEY, playerName);
+  const pick = document.getElementById('playerPick');
+  if (pick) pick.value = playerName;
+  if (typeof state !== 'undefined' && gameReady) refreshAll();
+}
+function stepPlayer(dir) {
+  if (!roster.length) return;
+  const i = roster.indexOf(playerName);
+  const next = i < 0 ? (dir > 0 ? 0 : roster.length - 1) : (i + dir + roster.length) % roster.length;
+  setPlayer(roster[next]);
+}
+function fillPlayerPick() {
+  const pick = document.getElementById('playerPick');
+  if (!pick) return;
+  pick.textContent = '';
+  pick.add(new Option(roster.length ? 'pick a player' : 'no player list yet', ''));
+  for (const n of roster) pick.add(new Option(n, n));
+  if (playerName && !roster.includes(playerName)) pick.add(new Option(playerName, playerName));
+  pick.value = playerName;
+}
+async function loadRoster() {
+  try {
+    const r = await fetch(`${BOARD_API}?what=players`, { cache: 'no-store' });
+    const j = await r.json();
+    roster = Array.isArray(j.names) ? j.names : [];
+  } catch (e) { /* offline: keep whatever name is set */ }
+  fillPlayerPick();
+  if (gameReady) refreshAll();
+}
+{
+  const pick = document.getElementById('playerPick');
+  if (pick) pick.addEventListener('change', () => setPlayer(pick.value));
+}
+
 // View switch, under the left panel
 let gameReady = false;
 const viewGroup = new THREE.Group();
@@ -652,6 +707,8 @@ function drawTray() {
 // Game state
 // ---------------------------------------------------------------------------
 const state = {
+  runId: '',
+  sendStatus: '', // '' | sending | sent | retrying | failed
   phase: 'intro', // intro | playing | solved | finished
   levelIndex: 0,
   tray: [],
@@ -697,6 +754,8 @@ function setMessage(text, kind = 'info') {
 }
 
 function startRun() {
+  state.runId = `${(HEADSET || 'x').replace(/[^A-Za-z0-9]/g, '')}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+  state.sendStatus = '';
   state.runStart = now();
   state.runEnd = 0;
   state.results = LEVELS.map(() => ({ best: 0, solved: false, gates: null, attempts: 0 }));
@@ -858,11 +917,13 @@ function finishRun(reason) {
   state.finishReason = reason;
   applyFog(false);
   saveResult();
+  queueResult();
   setMessage('Run complete. Show this screen to a staff member.', 'good');
   refreshAll();
 }
 
 function resetForNextPlayer() {
+  if (gameReady && state.phase === 'finished') setPlayer('');
   state.phase = 'intro';
   state.runStart = 0;
   state.runEnd = 0;
@@ -881,6 +942,48 @@ function resetForNextPlayer() {
   setMessage('Press START when you are ready. The clock starts on START.', 'info');
   refreshAll();
 }
+
+function queueResult() {
+  const scored = LEVELS.filter((L) => L.scored);
+  const rec = {
+    action: 'score', round: ROUND, runId: state.runId, name: playerName, headset: HEADSET,
+    score: totalScore(), time: Math.round(elapsed()),
+    levels: LEVELS.filter((L, i) => L.scored && state.results[i].solved).length, total: scored.length,
+    reason: state.finishReason,
+  };
+  let box = [];
+  try { box = JSON.parse(storeGet(OUTBOX_KEY) || '[]'); } catch (e) { box = []; }
+  box.push(rec);
+  storeSet(OUTBOX_KEY, JSON.stringify(box.slice(-50)));
+  outboxMem = box.slice(-50);
+  state.sendStatus = 'sending';
+  flushOutbox();
+}
+
+let outboxMem = null; // used when the headset's storage is unavailable
+let flushing = false;
+async function flushOutbox() {
+  if (flushing) return;
+  flushing = true;
+  try {
+    let box;
+    try { box = JSON.parse(storeGet(OUTBOX_KEY) || 'null'); } catch (e) { box = null; }
+    if (!Array.isArray(box)) box = outboxMem || [];
+    const left = [];
+    for (const rec of box) {
+      try {
+        const r = await fetch(BOARD_API, { method: 'POST', body: JSON.stringify(rec) });
+        if (r.ok || r.status === 400) { if (rec.runId === state.runId) state.sendStatus = r.ok ? 'sent' : 'failed'; continue; }
+        left.push(rec);
+      } catch (e) { left.push(rec); }
+    }
+    storeSet(OUTBOX_KEY, JSON.stringify(left));
+    outboxMem = left;
+    if (left.some((x) => x.runId === state.runId)) state.sendStatus = 'retrying';
+    if (state.phase === 'finished') drawMission();
+  } finally { flushing = false; }
+}
+setInterval(flushOutbox, 10000);
 
 function saveResult() {
   try {
@@ -1069,7 +1172,7 @@ function drawMission() {
       ctx.fillText(`Headset ${HEADSET}`, W - 52, y);
       ctx.textAlign = 'left';
     }
-    y += 80;
+    y += 72;
     LEVELS.forEach((L, i) => {
       if (!L.scored) return;
       const r = state.results[i];
@@ -1080,9 +1183,9 @@ function drawMission() {
       ctx.fillStyle = r.solved ? C.mint : C.warn;
       ctx.fillText(r.solved ? `${(r.best * 100).toFixed(0)}% · ${r.gates} gates` : `${(r.best * 100).toFixed(0)}% · not solved`, W - 52, y);
       ctx.textAlign = 'left';
-      y += 62;
+      y += 56;
     });
-    y += 40;
+    y += 34;
     ctx.fillStyle = C.text;
     ctx.font = `800 84px ${FONT}`;
     ctx.fillText(`${totalScore()} pts`, x, y + 20);
@@ -1090,10 +1193,21 @@ function drawMission() {
     ctx.font = `700 50px ${FONT}`;
     ctx.fillText(`Time ${fmtTime(elapsed())}`, W - 52, y + 20);
     ctx.textAlign = 'left';
-    y += 110;
+    y += 96;
     ctx.fillStyle = C.dim;
     ctx.font = `500 36px ${FONT}`;
-    wrap(ctx, 'Staff: write down the score and time, then press NEW PLAYER.', x, y, maxW, 48);
+    ctx.font = `600 40px ${FONT}`;
+    ctx.fillStyle = C.text;
+    ctx.fillText(playerName || 'No player name picked', x, y);
+    y += 56;
+    const st = state.sendStatus;
+    ctx.fillStyle = st === 'sent' ? C.mint : C.warn;
+    ctx.font = `600 36px ${FONT}`;
+    ctx.fillText(st === 'sent' ? 'Sent to the leaderboard ✓' : st === 'failed' ? 'Leaderboard refused it: write it down' : 'Sending to the leaderboard…', x, y);
+    y += 52;
+    ctx.fillStyle = C.dim;
+    ctx.font = `500 34px ${FONT}`;
+    wrap(ctx, 'Staff: press NEW PLAYER, then pick the next name.', x, y, maxW, 44);
   } else {
     const L = level();
     ctx.fillText(state.phase === 'solved' ? 'CHECKPOINT REACHED' : 'TARGET', x, y);
@@ -1148,6 +1262,12 @@ function refreshButtons() {
   primaryBtn.setEnabled(state.phase !== 'playing' && !state.anim);
   viewBtn.setLabel(viewMode === 'outside' ? 'INSIDE VIEW' : 'OUTSIDE VIEW');
   viewBtn.setEnabled(!state.anim);
+  const intro = state.phase === 'intro';
+  playerGroup.visible = intro;
+  playerBtn.setLabel(playerName ? `PLAYER: ${playerName}`.slice(0, 26) : (roster.length ? 'PICK PLAYER' : 'NO PLAYER LIST'));
+  playerBtn.setEnabled(intro && roster.length > 0);
+  prevPlayerBtn.setEnabled(intro && roster.length > 0);
+  nextPlayerBtn.setEnabled(intro && roster.length > 0);
 }
 
 function refreshAll() {
@@ -1350,6 +1470,7 @@ function showLog() {
 window.__bloch = {
   state, addGate, launch, undo, clearTray, primaryAction, totalScore, LEVELS, finishRun, setView,
   view: () => viewMode,
+  player: () => playerName, setPlayer, roster: () => roster, outbox: () => storeGet(OUTBOX_KEY), flushOutbox,
   round: ROUND,
   tipWorld: () => tipDot.getWorldPosition(new THREE.Vector3()).toArray(),
   beaconWorld: () => beacon.getWorldPosition(new THREE.Vector3()).toArray(),
@@ -1364,3 +1485,5 @@ window.__bloch = {
 setView(viewMode);
 gameReady = true;
 resetForNextPlayer();
+loadRoster();
+flushOutbox();
